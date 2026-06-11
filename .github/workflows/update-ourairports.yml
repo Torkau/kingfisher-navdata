@@ -1,0 +1,40 @@
+name: Update OurAirports Data
+
+# Baut monatlich ourairports.sqlite aus den Public-Domain-CSVs von OurAirports
+# (airports/runways/navaids) und committet sie, wenn sich die Daten geaendert
+# haben. Dient als LNM-freie Auffuellquelle fuer die Slim-DB.
+
+on:
+  schedule:
+    - cron: "0 6 1 * *"      # monatlich am 1. um 06:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: ourairports.sqlite bauen
+        run: python3 build_ourairports.py .
+
+      - name: Committen wenn geaendert
+        run: |
+          if [ -n "$(git status --porcelain ourairports.sqlite)" ]; then
+            git config user.name "ourairports-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add ourairports.sqlite ourairports_version.json
+            git commit -m "Auto: OurAirports aktualisiert"
+            git push
+            echo "Aktualisiert und committet."
+          else
+            git checkout -- ourairports_version.json 2>/dev/null || true
+            echo "OurAirports unveraendert, kein Commit."
+          fi
