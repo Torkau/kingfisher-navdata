@@ -19,9 +19,13 @@ jobs:
           python-version: "3.x"
 
       - name: Neueste IVAO-Datei pruefen und bauen
+        env:
+          EVENT: ${{ github.event_name }}
         run: |
+          pip install --quiet shapely
           python3 - <<'PY'
           import urllib.request, re, json, os, subprocess
+          force = os.environ.get("EVENT") == "workflow_dispatch"
           base = "https://www.littlenavmap.org/downloads/Airspace%20Boundaries/"
           req = urllib.request.Request(base, headers={"User-Agent": "kingfisher-navdata-bot"})
           html = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "ignore")
@@ -34,8 +38,10 @@ jobs:
               cur = json.load(open("version.json")).get("boundaries", "")
           except Exception:
               cur = ""
-          print("Neueste:", latest, "| aktuell im Repo:", cur or "(keine)")
-          if latest <= cur:
+          mcur = re.match(r"\d{8}", cur or "")
+          curd = mcur.group(0) if mcur else ""
+          print("Neueste:", latest, "| aktuell (Datum):", curd or "(keine)", "| force:", force)
+          if (not force) and latest <= curd:
               print("Bereits aktuell, nichts zu tun.")
               raise SystemExit(0)
           url = base + "IVAO%20ATC%20Positions%20" + latest + ".zip"
@@ -52,7 +58,7 @@ jobs:
             git config user.name "boundaries-bot"
             git config user.email "actions@users.noreply.github.com"
             git add sector_boundaries.js version.json
-            git commit -m "Auto: IVAO Sector Boundaries aktualisiert"
+            git commit -m "Auto: IVAO Sector Boundaries aktualisiert (Union)"
             git push
             echo "Aktualisiert und committet."
           else
