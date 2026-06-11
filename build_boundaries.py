@@ -17,7 +17,10 @@ atc_positions.json ist ein Array aus Objekten:
     Airport (sonst):   airport_id, middle_identifier, position, name, type, map_region
 map_region ist eine Liste aus {"lat":..,"lng":..}.
 
-Mehrere Teilflaechen eines Centers (z.B. EDMM) werden in "sectors" gesammelt.
+Mehrere Volumina einer Position (z.B. Hoehenbaender von EDWW_CTR) werden, sofern
+shapely verfuegbar ist, zur Aussenkontur verschmolzen (Union). Ueberlappende
+Flaechen ergeben so eine saubere Grenze, wirklich getrennte Gebiete bleiben als
+mehrere Ringe erhalten. Ohne shapely werden die Rohpolygone uebernommen.
 Koordinaten werden als [lon, lat] abgelegt (Schema der App).
 """
 import sys
@@ -28,6 +31,17 @@ import zipfile
 import struct
 import zlib
 import datetime
+
+# Build-Revision: bei Konverter-Aenderungen (z.B. Union) erhoehen, damit die App
+# die neue Datei auch bei gleichem IVAO-Datum nachlaedt. Format: <YYYYMMDD>-<rev>.
+BUILD_REV = "u1"
+
+try:
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    _HAVE_SHAPELY = True
+except Exception:
+    _HAVE_SHAPELY = False
 
 
 def _read_atc_json_from_zip(path):
@@ -104,8 +118,47 @@ def _coords(map_region):
     return out
 
 
+def _union_rings(sectors):
+    """Verschmilzt ueberlappende Polygone einer Position zur Aussenkontur.
+    Gibt eine Liste von Ringen [[lon,lat],...] zurueck. Ohne shapely oder bei
+    Fehlern werden die Eingabepolygone unveraendert zurueckgegeben."""
+    if not _HAVE_SHAPELY or len(sectors) < 2:
+        return sectors
+    polys = []
+    for ring in sectors:
+        if len(ring) < 3:
+            continue
+        try:
+            p = Polygon(ring)
+            if not p.is_valid:
+                p = p.buffer(0)
+            if (not p.is_empty) and p.is_valid:
+                polys.append(p)
+        except Exception:
+            continue
+    if not polys:
+        return sectors
+    try:
+        u = unary_union(polys)
+    except Exception:
+        return sectors
+    geoms = list(u.geoms) if hasattr(u, "geoms") else [u]
+    out = []
+    for g in geoms:
+        try:
+            if g.is_empty:
+                continue
+            ext = list(g.exterior.coords)
+            ring = [[round(float(x), 5), round(float(y), 5)] for (x, y) in ext]
+            if len(ring) >= 3:
+                out.append(ring)
+        except Exception:
+            continue
+    return out or sectors
+
+
 def build(arr, version):
-    # CTR/FSS: pro (icao, middle) alle Teilpolygone in "sectors" sammeln.
+    # CTR/FSS: pro (icao, middle) alle Teilpolygone sammeln, dann Union.
     # APP/DEP/...: pro (icao, middle, position) bei Dubletten groesstes Polygon.
     fir_map = {}
     ap_map = {}
@@ -134,10 +187,13 @@ def build(arr, version):
             if (not e) or len(coords) > len(e["coords"]):
                 ap_map[k] = {"icao": icao, "middle": mid, "position": posn,
                              "name": o.get("name") or icao, "coords": coords}
+    for e in fir_map.values():
+        e["sectors"] = _union_rings(e["sectors"])
+    ver = version + ("-" + BUILD_REV if BUILD_REV else "")
     return {
         "type": "IVAO Sector Boundaries",
-        "source": "IVAO ATC Positions " + version,
-        "version": version,
+        "source": "IVAO ATC Positions " + version + (" (" + BUILD_REV + ")" if BUILD_REV else ""),
+        "version": ver,
         "airport_sectors": list(ap_map.values()),
         "fir_sectors": list(fir_map.values()),
     }
@@ -168,8 +224,9 @@ def main():
         json.dump(data, f, separators=(",", ":"), ensure_ascii=False)
         f.write(";\n")
     with open(os.path.join(out_dir, "version.json"), "w", encoding="utf-8") as f:
-        json.dump({"boundaries": version}, f)
-    print("Version:", version,
+        json.dump({"boundaries": data["version"]}, f)
+    print("Version:", data["version"],
+          "| shapely:", _HAVE_SHAPELY,
           "| airport_sectors:", len(data["airport_sectors"]),
           "| fir_sectors:", len(data["fir_sectors"]))
 
