@@ -10,18 +10,20 @@ Aufruf:
 
 Schreibt in den Zielordner (Standard: aktuelles Verzeichnis):
     sector_boundaries.js   - window.EMBEDDED_BOUNDARIES = {...};
-    version.json           - {"boundaries":"YYYYMMDD"}
+    version.json           - {"boundaries":"YYYYMMDD-<rev>"}
 
 atc_positions.json ist ein Array aus Objekten:
     Center (CTR/FSS):  center_id, middle_identifier, position, name, type, map_region
     Airport (sonst):   airport_id, middle_identifier, position, name, type, map_region
 map_region ist eine Liste aus {"lat":..,"lng":..}.
 
-Mehrere Volumina einer Position (z.B. Hoehenbaender von EDWW_CTR) werden, sofern
-shapely verfuegbar ist, zur Aussenkontur verschmolzen (Union). Ueberlappende
-Flaechen ergeben so eine saubere Grenze, wirklich getrennte Gebiete bleiben als
-mehrere Ringe erhalten. Ohne shapely werden die Rohpolygone uebernommen.
-Koordinaten werden als [lon, lat] abgelegt (Schema der App).
+Sektor-Modell (deckungsgleich mit IVAO/webeye):
+ - Jede Position wird auf ihr groesstes Polygon reduziert (kein Ausbeulen durch
+   Vereinigung ueberlappender Hoehenbaender).
+ - Der Vollsektor (ohne middle) eines unterteilten Centers ist die Vereinigung
+   seiner Sub-Sektoren (E/W/NE/...). Die groben no-middle-Polygone werden so
+   ersetzt. Wirklich getrennte Gebiete bleiben als mehrere Ringe erhalten.
+Ohne shapely werden die Rohpolygone uebernommen. Koordinaten als [lon, lat].
 """
 import sys
 import os
@@ -32,9 +34,9 @@ import struct
 import zlib
 import datetime
 
-# Build-Revision: bei Konverter-Aenderungen (z.B. Union) erhoehen, damit die App
-# die neue Datei auch bei gleichem IVAO-Datum nachlaedt. Format: <YYYYMMDD>-<rev>.
-BUILD_REV = "u1"
+# Build-Revision: bei Konverter-Aenderungen erhoehen, damit die App die neue
+# Datei auch bei gleichem IVAO-Datum nachlaedt. Format: <YYYYMMDD>-<rev>.
+BUILD_REV = "u2"
 
 try:
     from shapely.geometry import Polygon
@@ -119,7 +121,7 @@ def _coords(map_region):
 
 
 def _union_rings(sectors):
-    """Verschmilzt ueberlappende Polygone einer Position zur Aussenkontur.
+    """Vereinigt Polygone (z.B. die Sub-Sektoren eines Centers) zur Aussenkontur.
     Gibt eine Liste von Ringen [[lon,lat],...] zurueck. Ohne shapely oder bei
     Fehlern werden die Eingabepolygone unveraendert zurueckgegeben."""
     if not _HAVE_SHAPELY or len(sectors) < 2:
@@ -157,8 +159,23 @@ def _union_rings(sectors):
     return out or sectors
 
 
+def _largest_ring(sectors):
+    """Reduziert eine Liste von Polygonen auf das flaechengroesste (bzw. mit den
+    meisten Punkten, falls shapely fehlt). Vermeidet das Ausbeulen durch
+    Vereinigung ueberlappender Hoehenbaender."""
+    rings = [r for r in sectors if len(r) >= 3]
+    if len(rings) <= 1:
+        return rings or sectors
+    if _HAVE_SHAPELY:
+        try:
+            return [max(rings, key=lambda r: Polygon(r).buffer(0).area)]
+        except Exception:
+            pass
+    return [max(rings, key=len)]
+
+
 def build(arr, version):
-    # CTR/FSS: pro (icao, middle) alle Teilpolygone sammeln, dann Union.
+    # CTR/FSS: pro (icao, middle) alle Teilpolygone sammeln.
     # APP/DEP/...: pro (icao, middle, position) bei Dubletten groesstes Polygon.
     fir_map = {}
     ap_map = {}
@@ -187,8 +204,20 @@ def build(arr, version):
             if (not e) or len(coords) > len(e["coords"]):
                 ap_map[k] = {"icao": icao, "middle": mid, "position": posn,
                              "name": o.get("name") or icao, "coords": coords}
+    # Jede Position auf ihr massgebliches (groesstes) Polygon reduzieren.
     for e in fir_map.values():
-        e["sectors"] = _union_rings(e["sectors"])
+        e["sectors"] = _largest_ring(e["sectors"])
+    # Sub-Sektoren je Center sammeln.
+    subs_by_icao = {}
+    for (icao, mid), e in fir_map.items():
+        if mid and e["sectors"]:
+            subs_by_icao.setdefault(icao, []).append(e["sectors"][0])
+    # Vollsektor (ohne middle) eines unterteilten Centers ist die Vereinigung
+    # seiner Sub-Sektoren, genau wie IVAO/webeye die Gesamtflaeche bildet. Die
+    # groben no-middle-Polygone werden dadurch ersetzt (sie beulen aus).
+    for (icao, mid), e in fir_map.items():
+        if (not mid) and subs_by_icao.get(icao):
+            e["sectors"] = _union_rings(subs_by_icao[icao])
     ver = version + ("-" + BUILD_REV if BUILD_REV else "")
     return {
         "type": "IVAO Sector Boundaries",
